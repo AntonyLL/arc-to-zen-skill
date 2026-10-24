@@ -4,7 +4,7 @@ description: Migrate Arc Browser to Zen on macOS, including Spaces, profile/cont
 license: MIT
 metadata:
   author: AntonyLL
-  version: "1.0.0"
+  version: "1.0.1"
   requirements: "macOS; Python 3.9+; Arc and Zen; filesystem and browser UI access. Optional preview: macOS 13+ and Xcode Command Line Tools."
 ---
 
