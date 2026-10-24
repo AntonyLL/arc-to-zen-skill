@@ -1,0 +1,4 @@
+interface:
+  display_name: "Arc → Zen Migration"
+  short_description: "Migrate Arc workflows to Zen with backups and checks"
+  default_prompt: "Use $arc-to-zen to migrate my Arc browser workflow to Zen, preserving my Spaces, tabs, bookmarks, extension content, and shortcuts."

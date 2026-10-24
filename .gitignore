@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.venv/
+.build/
+dist/
+*.app/
+# Migration outputs and browser data must remain local.
+work/
+output/
+backup*/
+staged/
+StorableSidebar.json
+Bookmarks
+*.sqlite*
+*.jsonlz4
+prefs.js
+inventory.json
+manifest.json
+transaction.json
+bookmark-report.json
+bookmarks.html
