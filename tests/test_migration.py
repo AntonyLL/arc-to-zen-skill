@@ -102,6 +102,27 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(len(manifest["contexts"]), 2)
         self.assertGreater(min(manifest["contexts"].values()), 4)
 
+    def test_containers_skip_firefox_internal_identity_ids(self):
+        containers = m.load_json(self.zen / "containers.json")
+        containers["identities"] += [
+            {"userContextId": 5, "public": False, "name": "userContextIdInternal.thumbnail"},
+            {"userContextId": 4294967295, "public": False, "name": "userContextIdInternal.webextStorageLocal"}]
+        containers["lastUserContextId"] = 5
+        m.save_json(self.zen / "containers.json", containers)
+        payload, manifest = m.native_plan(m.arc_inventory(self.arc), self.zen)
+        self.assertEqual(sorted(manifest["contexts"].values()), [6, 7])
+        self.assertEqual(json.loads(payload["containers.json"])["lastUserContextId"], 7)
+
+    def test_every_new_entry_has_a_triggering_principal(self):
+        payload, manifest = m.native_plan(m.arc_inventory(self.arc), self.zen)
+        for name in ("zen-sessions.jsonlz4", "sessionstore.jsonlz4"):
+            data = m.decode_mozlz4(payload[name])
+            tabs = data["tabs"] if "tabs" in data else data["windows"][0]["tabs"]
+            new = [t for t in tabs if t.get("zenSyncId") in manifest["tab_ids"]]
+            self.assertEqual(len(new), len(manifest["tab_ids"]))
+            for tab in new:
+                self.assertEqual([e.get("triggeringPrincipal_base64") for e in tab["entries"]], [m.SYSTEM_PRINCIPAL])
+
     def test_empty_favorites_profile_without_space_is_harmless(self):
         value = m.load_json(self.arc / "StorableSidebar.json")
         source = value["sidebar"]["containers"][1]

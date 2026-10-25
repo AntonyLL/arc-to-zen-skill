@@ -22,6 +22,10 @@ MAGIC = b"mozLz40\0"
 MAX_SIZE = 128 * 1024 * 1024
 NATIVE_FILES = ("zen-sessions.jsonlz4", "sessionstore.jsonlz4", "containers.json", "prefs.js")
 NAMESPACE = uuid.UUID("c7f05006-9624-43c3-a2f2-fcbe3d3f2911")
+# Firefox's serialized system principal, as Zen stores for pinned and user-typed loads.
+# Without one, restore falls back to a null principal lacking the tab's container
+# origin attributes, and loading such a container tab crashed Zen 1.23.4b.
+SYSTEM_PRINCIPAL = '{"3":{}}'
 
 
 class MigrationError(ValueError):
@@ -349,8 +353,12 @@ def native_plan(inventory, profile, url_map=None):
     if inventory["folders"] or inventory["issues"]:
         raise MigrationError("Native helper supports flat Arc sidebars only. Use bookmarks.html and inventory.json to recreate folders/splits in Zen; no profile was changed.")
     contexts, new_spaces, new_tabs, skipped = {}, [], [], []
+    # Firefox reserves internal identities near UINT32_MAX (webextStorageLocal is 4294967295);
+    # allocate from its own counter like ContextualIdentityService, ignoring that reserved range.
     existing_contexts = [i.get("userContextId", 0) for i in containers["identities"]]
-    next_context = max([containers["lastUserContextId"]] + existing_contexts)
+    next_context = max([containers["lastUserContextId"]] + [c for c in existing_contexts if c < 2 ** 31])
+    if next_context + len({s["profile"] for s in inventory["spaces"]}) >= 2 ** 31:
+        raise MigrationError("Zen container IDs are outside the supported range; inspect containers.json")
     for space in inventory["spaces"]:
         p = space["profile"]
         if p not in contexts:
@@ -383,7 +391,7 @@ def native_plan(inventory, profile, url_map=None):
             continue
         entry = {"url": url, "title": t["title"]}
         pinned = t["kind"] != "unpinned"
-        tab = {"entries": [entry], "index": 1, "lastAccessed": int(time.time() * 1000),
+        tab = {"entries": [dict(entry, triggeringPrincipal_base64=SYSTEM_PRINCIPAL)], "index": 1, "lastAccessed": int(time.time() * 1000),
                "hidden": False, "zenWorkspace": sid_map[t["space_id"]],
                "zenSyncId": str(uuid.uuid5(NAMESPACE, "tab:" + t["arc_id"])),
                "zenEssential": t["kind"] == "favorite", "pinned": pinned,
