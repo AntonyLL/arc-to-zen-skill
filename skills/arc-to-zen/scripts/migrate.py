@@ -22,6 +22,10 @@ MAGIC = b"mozLz40\0"
 MAX_SIZE = 128 * 1024 * 1024
 NATIVE_FILES = ("zen-sessions.jsonlz4", "sessionstore.jsonlz4", "containers.json", "prefs.js")
 NAMESPACE = uuid.UUID("c7f05006-9624-43c3-a2f2-fcbe3d3f2911")
+# Firefox's serialized system principal, as Zen stores for pinned and user-typed loads.
+# Without one, restore falls back to a null principal lacking the tab's container
+# origin attributes, and loading such a container tab crashed Zen 1.23.4b.
+SYSTEM_PRINCIPAL = '{"3":{}}'
 
 
 class MigrationError(ValueError):
@@ -346,11 +350,21 @@ def native_plan(inventory, profile, url_map=None):
         raise MigrationError("Initialize Zen with an ordinary tab before preparing")
     if not isinstance(containers.get("identities"), list) or not isinstance(containers.get("lastUserContextId"), int):
         raise MigrationError("Unsupported Zen containers schema")
-    if inventory["folders"] or inventory["issues"]:
-        raise MigrationError("Native helper supports flat Arc sidebars only. Use bookmarks.html and inventory.json to recreate folders/splits in Zen; no profile was changed.")
+    if inventory["issues"]:
+        raise MigrationError("Native helper cannot convert Arc split views or unresolved items. Use bookmarks.html and inventory.json to recreate them in Zen; no profile was changed.")
+    for f in inventory["folders"]:
+        # Zen folders are pinned-only; depth follows zen.folders.max-subfolders (default 5).
+        if f["kind"] != "pinned":
+            raise MigrationError("Native helper converts pinned Arc folders only; no profile was changed.")
+        if len(f["ids"]) > 5:
+            raise MigrationError("Arc folder nesting exceeds Zen's default subfolder limit; no profile was changed.")
     contexts, new_spaces, new_tabs, skipped = {}, [], [], []
+    # Firefox reserves internal identities near UINT32_MAX (webextStorageLocal is 4294967295);
+    # allocate from its own counter like ContextualIdentityService, ignoring that reserved range.
     existing_contexts = [i.get("userContextId", 0) for i in containers["identities"]]
-    next_context = max([containers["lastUserContextId"]] + existing_contexts)
+    next_context = max([containers["lastUserContextId"]] + [c for c in existing_contexts if c < 2 ** 31])
+    if next_context + len({s["profile"] for s in inventory["spaces"]}) >= 2 ** 31:
+        raise MigrationError("Zen container IDs are outside the supported range; inspect containers.json")
     for space in inventory["spaces"]:
         p = space["profile"]
         if p not in contexts:
@@ -375,7 +389,37 @@ def native_plan(inventory, profile, url_map=None):
             "containerTabId": contexts[s["profile"]], "position": position + n * 1000,
             "theme": theme, "hasCollapsedPinnedTabs": False})
     url_map = url_map or {}
-    for t in inventory["tabs"]:
+    fid_map = {f["arc_id"]: str(uuid.uuid5(NAMESPACE, "folder:" + f["arc_id"])) for f in inventory["folders"]}
+    existing_folders = {f.get("id") for f in z["folders"]} | {g.get("id") for g in z["groups"]}
+    if existing_folders.intersection(fid_map.values()):
+        raise MigrationError("These Arc folders already exist in the target; refusing a duplicate import")
+    new_folders, new_groups = [], []
+    # Last DOM sibling per container, as Zen's storeDataForSessionStore records prevSiblingInfo.
+    last_child = {}
+    # Inventory order is the sidebar's depth-first order, so folders precede their contents.
+    for kind, t in sorted([("folder", f) for f in inventory["folders"]] + [("tab", t) for t in inventory["tabs"]],
+                          key=lambda pair: pair[1]["order"]):
+        if kind == "folder":
+            fid = fid_map[t["arc_id"]]
+            parent = fid_map[t["ids"][-2]] if len(t["ids"]) > 1 else None
+            key = parent or ("space", t["space_id"])
+            prev = last_child.get(key)
+            empty_id = str(uuid.uuid5(NAMESPACE, "folder-empty:" + t["arc_id"]))
+            blank = {"url": "about:blank"}
+            new_tabs.append({"entries": [dict(blank, triggeringPrincipal_base64=SYSTEM_PRINCIPAL)], "index": 1, "lastAccessed": int(time.time() * 1000),
+                "hidden": False, "zenWorkspace": sid_map[t["space_id"]], "zenSyncId": empty_id,
+                "zenEssential": False, "pinned": True, "groupId": fid, "zenDefaultUserContextId": None,
+                "zenIsEmpty": True, "zenHasStaticIcon": False, "userContextId": contexts[t["profile"]],
+                "attributes": {}, "_zenPinnedInitialState": {"entry": blank.copy(), "image": None}})
+            new_folders.append({"pinned": True, "splitViewGroup": False, "id": fid, "name": t["path"][-1],
+                "collapsed": True, "saveOnWindowClose": True, "parentId": parent,
+                "prevSiblingInfo": {"type": prev[0], "id": prev[1]} if prev else None,
+                "emptyTabIds": [empty_id], "userIcon": "", "workspaceId": sid_map[t["space_id"]]})
+            new_groups.append({"pinned": True, "splitView": False, "id": fid, "name": t["path"][-1],
+                "color": "zen-workspace-color", "collapsed": True, "saveOnWindowClose": True})
+            last_child[key] = ("group", fid)
+            last_child[fid] = ("tab", empty_id)
+            continue
         url = url_map.get(t["url"], t["url"])
         mapped_extension = t["url"] in url_map and urlsplit(url).scheme == "moz-extension" and bool(urlsplit(url).hostname)
         if not (web_url(url) or url == "about:blank" or mapped_extension):
@@ -383,7 +427,7 @@ def native_plan(inventory, profile, url_map=None):
             continue
         entry = {"url": url, "title": t["title"]}
         pinned = t["kind"] != "unpinned"
-        tab = {"entries": [entry], "index": 1, "lastAccessed": int(time.time() * 1000),
+        tab = {"entries": [dict(entry, triggeringPrincipal_base64=SYSTEM_PRINCIPAL)], "index": 1, "lastAccessed": int(time.time() * 1000),
                "hidden": False, "zenWorkspace": sid_map[t["space_id"]],
                "zenSyncId": str(uuid.uuid5(NAMESPACE, "tab:" + t["arc_id"])),
                "zenEssential": t["kind"] == "favorite", "pinned": pinned,
@@ -394,6 +438,9 @@ def native_plan(inventory, profile, url_map=None):
             tab["zenStaticLabel"] = t["title"]
         if t["muted"]:
             tab["muted"] = True
+        if t["folder_ids"]:
+            tab["groupId"] = fid_map[t["folder_ids"][-1]]
+        last_child[tab.get("groupId") or ("space", t["space_id"])] = ("tab", tab["zenSyncId"])
         new_tabs.append(tab)
     if not new_spaces or not new_tabs:
         raise MigrationError("No supported Arc spaces/tabs to import")
@@ -404,6 +451,8 @@ def native_plan(inventory, profile, url_map=None):
 
     z["tabs"] = merge_tabs(z["tabs"])
     z["spaces"].extend(new_spaces)
+    z["folders"].extend(new_folders)
+    z["groups"].extend(new_groups)
     z["lastCollected"] = int(time.time() * 1000)
     selected_index = window.get("selected", 1) - 1
     if not 0 <= selected_index < len(window["tabs"]):
@@ -412,6 +461,9 @@ def native_plan(inventory, profile, url_map=None):
     window["tabs"] = merge_tabs(window["tabs"])
     window["selected"] = next(i for i, tab in enumerate(window["tabs"], 1) if tab is selected)
     window["spaces"] = copy.deepcopy(z["spaces"])
+    # Zen mirrors the sidebar's folders/groups into the window; keep them identical.
+    window["folders"] = copy.deepcopy(z["folders"])
+    window["groups"] = copy.deepcopy(z["groups"])
     prefs = (profile / "prefs.js").read_text(encoding="utf-8")
     for key, value in {"browser.startup.page": 3, "zen.workspaces.separate-essentials": True}.items():
         prefs = pref(prefs, key, value)
@@ -421,9 +473,10 @@ def native_plan(inventory, profile, url_map=None):
         raise MigrationError("Zen changed during preparation; quit Zen and prepare again")
     return payload, {"schema": 1, "profile": str(profile), "before": before,
         "after": {name: hashlib.sha256(data).hexdigest() for name, data in payload.items()},
-        "spaces_added": len(new_spaces), "tabs_added": len(new_tabs), "contexts": contexts,
+        "spaces_added": len(new_spaces), "tabs_added": len(new_tabs) - len(new_folders), "contexts": contexts,
         "skipped": skipped, "tab_ids": [t["zenSyncId"] for t in new_tabs],
         "space_ids": [s["uuid"] for s in new_spaces],
+        "folders_added": len(new_folders), "folder_ids": [f["id"] for f in new_folders],
         "preferences_changed": {"browser.startup.page": 3, "zen.workspaces.separate-essentials": True}}
 
 
@@ -462,7 +515,7 @@ def prepare(args):
             (staged / name).write_bytes(data)
             (staged / name).chmod(0o600)
         save_json(out / "manifest.json", manifest)
-        result["native"] = {k: manifest[k] for k in ("spaces_added", "tabs_added", "skipped", "preferences_changed")}
+        result["native"] = {k: manifest[k] for k in ("spaces_added", "tabs_added", "folders_added", "skipped", "preferences_changed")}
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
@@ -543,11 +596,17 @@ def verify(work):
         index = tab.get("index", 1) - 1
         entries = tab.get("entries", [])
         current = entries[index].get("url") if 0 <= index < len(entries) else None
-        if current != expected_tab["entries"][0]["url"] or any(tab.get(k) != expected_tab.get(k) for k in ("userContextId", "zenWorkspace", "pinned", "zenEssential")):
+        if current != expected_tab["entries"][0]["url"] or any(tab.get(k) != expected_tab.get(k) for k in ("userContextId", "zenWorkspace", "pinned", "zenEssential", "groupId")):
             mismatched.append(key)
     missing_spaces = sorted(set(manifest["space_ids"]) - {s["uuid"] for s in z["spaces"]})
-    return {"ok": not (missing or mismatched or missing_spaces), "missing_tabs": missing,
-            "changed_tabs": mismatched, "missing_spaces": missing_spaces,
+    staged_folders = {f["id"]: f for f in staged["folders"] if f["id"] in manifest.get("folder_ids", [])}
+    actual_folders = {f.get("id"): f for f in z.get("folders", [])}
+    missing_folders = [key for key in manifest.get("folder_ids", []) if key not in actual_folders]
+    changed_folders = [key for key, f in staged_folders.items() if key in actual_folders
+                       and any(actual_folders[key].get(k) != f.get(k) for k in ("name", "parentId", "workspaceId"))]
+    return {"ok": not (missing or mismatched or missing_spaces or missing_folders or changed_folders),
+            "missing_tabs": missing, "changed_tabs": mismatched, "missing_spaces": missing_spaces,
+            "missing_folders": missing_folders, "changed_folders": changed_folders,
             "note": "Disk snapshot only; inspect the UI and verify again after a clean shutdown. Redirected/navigated tabs require manual review."}
 
 

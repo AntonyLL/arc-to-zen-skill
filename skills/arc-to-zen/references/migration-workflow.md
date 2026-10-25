@@ -19,7 +19,7 @@ Before closing Zen for the first time, check Settings → Privacy & Security →
 | Favorites | Essentials | Profile-scoped, shared between corresponding Spaces |
 | Pinned tabs | Pinned tabs | Preserve label, URL, and mute state |
 | Ordinary tabs | Ordinary tabs | Preserve source order |
-| Folders / split views | Native folders / splits | Inspect current schema or recreate in UI; v1 helper exports hierarchy only |
+| Folders / split views | Native folders / splits | Pinned folders, including nested ones, convert natively; recreate split views in the UI |
 | Chromium bookmarks | Zen bookmark HTML import | Additive by default; retain duplicates and nested folders |
 | Custom Space color | Zen gradient color | Approximation; inspect appearance in UI |
 | Arc profile login | Re-login in matching container | Containers do not copy Chromium authentication |

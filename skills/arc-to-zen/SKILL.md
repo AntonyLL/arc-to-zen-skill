@@ -29,7 +29,7 @@ For a complete migration, follow [migration-workflow.md](references/migration-wo
 
 1. Inventory Spaces, Arc profiles, Favorites, pins, ordinary tabs, bookmarks across profiles, extensions and saved extension content. Preserve source ordering and duplicate URLs. Arc's sidebar is separate from its Chromium Bookmarks files.
 2. Close Arc before taking the final source snapshot. Before the first Zen shutdown, inspect its cookie/site-data deletion-on-exit settings: a restart can erase existing logins. Change those settings only if consistent with the user's requested login persistence; otherwise explain the effect. Close Zen before native staging or writing.
-3. Generate local exports. Add `--zen-profile` to stage native files for a flat Arc sidebar:
+3. Generate local exports. Add `--zen-profile` to stage native files for an Arc sidebar, including pinned folders:
 
 ```sh
 python3 "$SKILL_ROOT/scripts/migrate.py" prepare \
@@ -38,7 +38,7 @@ python3 "$SKILL_ROOT/scripts/migrate.py" prepare \
 
 `prepare` never writes browser profiles. It exports `bookmarks.html`, an inventory, selected source snapshots, and, when supported, a native plan. The adapter adds Spaces and tabs to the existing single-window session. It assigns a **new container per Arc profile**; Spaces sharing a profile share that container. Existing Zen Spaces and browser data remain in the prepared session.
 
-Native folder/split conversion is deliberately unsupported in v1. For these inputs, the HTML export retains sidebar folders and the inventory records unsupported items. Complete the structure through Zen's UI using the source snapshot; never silently flatten it. See [native-format.md](references/native-format.md). Non-web URLs need review. For installed extensions, derive their current `moz-extension://` URL from the target profile and provide a local `--url-map` JSON object, then prepare into a fresh work directory.
+Pinned Arc folders, including nested ones, become native Zen folders. Native split conversion and folders outside pinned tabs are unsupported; for these inputs the helper refuses a native plan, the HTML export retains the hierarchy and the inventory records unsupported items. Complete the structure through Zen's UI using the source snapshot; never silently flatten it. See [native-format.md](references/native-format.md). Non-web URLs need review. For installed extensions, derive their current `moz-extension://` URL from the target profile and provide a local `--url-map` JSON object, then prepare into a fresh work directory.
 
 4. Review the manifest, intended target, skipped records and preference changes. The user's migration request authorizes routine work within that scope; do not repeatedly ask for permission. Resolve actual choices such as replacing bookmarks, changing the system browser, or adding a substitute extension. The default native helper adds data and refuses duplicates and stale plans.
 5. Apply the prepared plan when its scope is settled:

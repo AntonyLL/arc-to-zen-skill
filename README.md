@@ -49,7 +49,7 @@ Agents that use slash commands, including Claude Code, can invoke `/arc-to-zen`.
 
 - **Native profile changes and the preview app target macOS.** Install and launch Arc and Zen once before migration. Building the optional preview also requires macOS 13+ and Xcode Command Line Tools.
 - The original migration used **Arc 1.169.0 → Zen 1.23.4b**. Check the actual data format when using newer browser versions.
-- The v1 native adapter handles **flat Arc sidebars and a saved Zen session with one window**. Sidebar folders and split views are exported for the agent to reconstruct in Zen; the helper stops before native writes when it detects those structures.
+- The native adapter handles **Arc sidebars with pinned (optionally nested) folders and a saved Zen session with one window**. Folders become native Zen folders. Split views and folders outside pinned tabs are exported for the agent to reconstruct in Zen; the helper stops before native writes when it detects those structures.
 - Containers preserve the organization of separate accounts; websites require a fresh login. Passwords, cookies, payment information, wallet keys, and browser history are outside the default migration scope.
 - The preview uses its own persistent WebKit website storage. **Open in Zen** hands off the current URL; Zen extensions, containers, and unfinished forms are not shared.
 

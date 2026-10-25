@@ -4,13 +4,15 @@ The helper reads Arc's alternating Swift Codable maps for `items`, `spaces`, and
 
 The supported native Zen layout has `tabs`, `spaces`, `folders`, `groups` and `splitViewData` in `zen-sessions.jsonlz4`, plus a Firefox `sessionstore.jsonlz4` with one non-private window. Existing session fields, tabs, folders, closed-tab state, and Spaces are retained. The helper appends imported Spaces and merges pins before ordinary tabs. It does not write the Places SQLite database.
 
-New tab fields include `zenSyncId`, `zenWorkspace`, `zenEssential`, `pinned`, `userContextId` and `_zenPinnedInitialState`. Normal navigation/session loading establishes principals; the helper does not invent serialized security principals. New IDs are UUIDv5 values scoped to the importer. Containers get fresh integer IDs and labels `Arc — <profile directory>`.
+New tab fields include `zenSyncId`, `zenWorkspace`, `zenEssential`, `pinned`, `userContextId`, `groupId` and `_zenPinnedInitialState`. Each new entry carries the serialized system principal (`{"3":{}}`) as `triggeringPrincipal_base64`, as Zen stores for pinned tabs. New IDs are UUIDv5 values scoped to the importer. Containers get labels `Arc — <profile directory>` and IDs allocated from `lastUserContextId`; Firefox's internal identities near UINT32_MAX (such as `userContextIdInternal.webextStorageLocal`) are ignored, because IDs above 32 bits crash Zen when such a tab loads.
+
+Pinned Arc folders follow the layout Zen's `storeDataForSessionStore` writes: a `folders` entry (with `parentId` and `prevSiblingInfo` for nesting) mirrored by a `groups` entry with the same ID, one `zenIsEmpty` `about:blank` placeholder tab listed in `emptyTabIds`, and contained tabs tagged with their innermost folder's `groupId` in sidebar order. Folders and groups are mirrored into the window state. Nesting beyond Zen's default `zen.folders.max-subfolders` (5) is refused.
 
 The Mozilla wrapper is `mozLz40\0` followed by a little-endian decoded length and an LZ4 block. The dependency-free encoder writes valid literal-only blocks; these are larger than compressed files, and Zen can recompress them on shutdown. The decoder supports match sequences and rejects malformed offsets, truncated lengths and output over 128 MiB.
 
 ## Unsupported input
 
-- Native nested folders and Arc split views: export hierarchy, inspect raw local source, and recreate using the UI. The adapter refuses a native plan when folders or unresolved items are detected.
+- Arc split views and folders outside pinned tabs: export hierarchy, inspect raw local source, and recreate using the UI. The adapter refuses a native plan when these or unresolved items are detected.
 - More than one global Arc sidebar object: inspect the schema rather than guessing a winner.
 - More than one saved Zen window: close extra windows through the UI, quit, and prepare again, or implement and test an explicit merge for that version.
 - Extension URLs: install the target extension first, open its page, and derive its real target UUID. Supply exact old→new URLs through `--url-map`. Never reuse a UUID from another computer.

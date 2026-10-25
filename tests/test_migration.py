@@ -102,6 +102,17 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(len(manifest["contexts"]), 2)
         self.assertGreater(min(manifest["contexts"].values()), 4)
 
+    def test_containers_skip_firefox_internal_identity_ids(self):
+        containers = m.load_json(self.zen / "containers.json")
+        containers["identities"] += [
+            {"userContextId": 5, "public": False, "name": "userContextIdInternal.thumbnail"},
+            {"userContextId": 4294967295, "public": False, "name": "userContextIdInternal.webextStorageLocal"}]
+        containers["lastUserContextId"] = 5
+        m.save_json(self.zen / "containers.json", containers)
+        payload, manifest = m.native_plan(m.arc_inventory(self.arc), self.zen)
+        self.assertEqual(sorted(manifest["contexts"].values()), [6, 7])
+        self.assertEqual(json.loads(payload["containers.json"])["lastUserContextId"], 7)
+
     def test_empty_favorites_profile_without_space_is_harmless(self):
         value = m.load_json(self.arc / "StorableSidebar.json")
         source = value["sidebar"]["containers"][1]
@@ -191,13 +202,97 @@ class MigrationTests(unittest.TestCase):
         (self.zen / "zen-sessions.jsonlz4").write_bytes(m.encode_mozlz4(data))
         self.assertFalse(m.verify(work)["ok"])
 
-    def test_folders_export_but_block_native_conversion(self):
+    def nested_folders(self):
+        # p1: [before, outer[a, inner[b], c], after]
+        nested = self.root / "nested"
+        arc_fixture(nested, nested=True)
+        value = m.load_json(nested / "StorableSidebar.json")
+        source = value["sidebar"]["containers"][1]
+        items = m.pairs(source["items"], "items")
+        tab = lambda url: {"title": None, "childrenIds": [], "data": {"tab": {"savedURL": url}}}
+        for key in ("before", "a", "b", "c", "after"):
+            items[key] = tab("https://example.com/" + key)
+        items["p1"]["childrenIds"] = ["before", "outer", "after"]
+        items["outer"] = {"title": "Outer", "childrenIds": ["a", "inner", "c"], "data": {"itemContainer": {}}}
+        items["inner"] = {"title": "Inner", "childrenIds": ["b"], "data": {"itemContainer": {}}}
+        del items["folder"], items["pin"]
+        source["items"] = items
+        m.save_json(nested / "StorableSidebar.json", value)
+        return nested
+
+    def test_folders_export_and_convert_natively(self):
         nested = self.root / "nested"
         arc_fixture(nested, nested=True)
         inventory = m.arc_inventory(nested)
         document, _ = m.bookmark_document(nested, inventory)
         self.assertIn('Folder &lt;&amp;&gt;', document)
-        with self.assertRaisesRegex(m.MigrationError, "flat Arc sidebars"):
+        payload, manifest = m.native_plan(inventory, self.zen)
+        self.assertEqual(manifest["folders_added"], 1)
+        self.assertEqual(manifest["tabs_added"], 4)
+        z = m.decode_mozlz4(payload["zen-sessions.jsonlz4"])
+        folder = next(f for f in z["folders"] if f["id"] in manifest["folder_ids"])
+        self.assertEqual((folder["name"], folder["parentId"], folder["pinned"]), ("Folder <&>", None, True))
+        self.assertEqual([g["id"] for g in z["groups"]], [folder["id"]])
+        empty = next(t for t in z["tabs"] if t["zenSyncId"] == folder["emptyTabIds"][0])
+        self.assertTrue(empty["zenIsEmpty"])
+        self.assertEqual((empty["groupId"], empty["entries"][0]["url"]), (folder["id"], "about:blank"))
+        window = m.decode_mozlz4(payload["sessionstore.jsonlz4"])["windows"][0]
+        self.assertEqual((window["folders"], window["groups"]), (z["folders"], z["groups"]))
+
+    def test_nested_folders_follow_zen_dom_order_and_siblings(self):
+        nested = self.nested_folders()
+        payload, manifest = m.native_plan(m.arc_inventory(nested), self.zen)
+        z = m.decode_mozlz4(payload["zen-sessions.jsonlz4"])
+        folders = {f["name"]: f for f in z["folders"]}
+        outer, inner = folders["Outer"], folders["Inner"]
+        ids = {t["zenSyncId"]: t for t in z["tabs"]}
+        sync = lambda key: str(m.uuid.uuid5(m.NAMESPACE, "tab:" + key))
+        self.assertEqual(inner["parentId"], outer["id"])
+        self.assertEqual(inner["prevSiblingInfo"], {"type": "tab", "id": sync("a")})
+        self.assertEqual(outer["prevSiblingInfo"], {"type": "tab", "id": sync("before")})
+        self.assertEqual([ids[sync(k)].get("groupId") for k in ("before", "a", "b", "c", "after")],
+                         [None, outer["id"], inner["id"], outer["id"], None])
+        sequence = [t["zenSyncId"] for t in z["tabs"] if t["zenWorkspace"] == ids[sync("a")]["zenWorkspace"] and t["pinned"] and not t["zenEssential"]]
+        self.assertEqual(sequence, [sync("before"), outer["emptyTabIds"][0], sync("a"), inner["emptyTabIds"][0],
+                                    sync("b"), sync("c"), sync("after")])
+
+    def test_every_new_entry_has_a_triggering_principal(self):
+        nested = self.nested_folders()
+        payload, manifest = m.native_plan(m.arc_inventory(nested), self.zen)
+        new_ids = set(manifest["tab_ids"]) | {i for f in m.decode_mozlz4(payload["zen-sessions.jsonlz4"])["folders"] for i in f["emptyTabIds"]}
+        for name in ("zen-sessions.jsonlz4", "sessionstore.jsonlz4"):
+            data = m.decode_mozlz4(payload[name])
+            tabs = data["tabs"] if "tabs" in data else data["windows"][0]["tabs"]
+            new = [t for t in tabs if t.get("zenSyncId") in new_ids]
+            self.assertTrue(new)
+            for tab in new:
+                self.assertEqual([e.get("triggeringPrincipal_base64") for e in tab["entries"]], [m.SYSTEM_PRINCIPAL])
+
+    def test_nested_folders_apply_verify_and_detect_loss(self):
+        self.arc = self.nested_folders()
+        work, manifest = self.plan()
+        m.apply(work)
+        self.assertTrue(m.verify(work)["ok"])
+        data = m.read_session(self.zen / "zen-sessions.jsonlz4")
+        data["folders"] = [f for f in data["folders"] if f["name"] != "Inner"]
+        (self.zen / "zen-sessions.jsonlz4").write_bytes(m.encode_mozlz4(data))
+        result = m.verify(work)
+        self.assertFalse(result["ok"])
+        self.assertEqual(len(result["missing_folders"]), 1)
+
+    def test_unpinned_folder_and_repeat_folder_import_are_refused(self):
+        nested = self.root / "nested"
+        arc_fixture(nested, nested=True)
+        inventory = m.arc_inventory(nested)
+        unpinned = m.copy.deepcopy(inventory)
+        unpinned["folders"][0]["kind"] = "unpinned"
+        with self.assertRaisesRegex(m.MigrationError, "pinned Arc folders only"):
+            m.native_plan(unpinned, self.zen)
+        payload, _ = m.native_plan(inventory, self.zen)
+        z = m.decode_mozlz4(payload["zen-sessions.jsonlz4"])
+        z["spaces"] = [s for s in z["spaces"] if s["uuid"] == "existing-space"]
+        (self.zen / "zen-sessions.jsonlz4").write_bytes(m.encode_mozlz4(z))
+        with self.assertRaisesRegex(m.MigrationError, "folders already exist"):
             m.native_plan(inventory, self.zen)
 
     def test_sidebar_same_named_folders_remain_distinct_and_ordered(self):
